@@ -99,8 +99,10 @@ DEFAULT_CHANNELS: Dict[str, SensingChannel] = {
     'resource_battery':  SensingChannel('resource_battery',  False, 0.0, 0.0, 0.0),
     # Python runtime health
     'gc_pressure':       SensingChannel('gc_pressure',       False, 0.0, 0.0, 0.0),
-    # Network state (connectivity, distinct from traffic channels)
-    'network_interface': SensingChannel('network_interface', False, 0.0, 0.0, 0.0),
+    # Ledger proximity channel — the Triad sensing its own basin geometry
+    # How close is current state to the best basin ever recorded in the ledger.
+    # Populated in step() from peak Vol_opt comparison — not a system probe.
+    'ledger_proximity': SensingChannel('ledger_proximity', True, 0.0, 0.0, 0.0),
 }
 
 
@@ -120,7 +122,19 @@ class SensingOperator:
         Update sensing channels from env_signal.
         Dark (inactive) channels decay coverage.
         Returns new SensingOperator — does not mutate.
+
+        S: E × I → S'  (DASS invariant)
+        i_gate implements the I term: compression quality governs how much new
+        environmental signal is admitted into coverage. At I=0 → 50% admitted;
+        at I=1 → 100% admitted. Gate lives here — not in Reality — because
+        Reality is a substrate-agnostic measurement source that must not read
+        internal operator state.
         """
+        # I-gate: compression quality determines signal admission rate.
+        # internal_state is CompressionOperator; scalar_proxy ∈ [0, 1].
+        i_quality = internal_state.to_scalar_proxy() if internal_state is not None else 0.5
+        i_gate    = 0.5 + 0.5 * i_quality   # [0.5, 1.0]
+
         updated = {}
         for cid, channel in self.channels.items():
             if not channel.active:
@@ -149,21 +163,25 @@ class SensingOperator:
                 continue
 
             if isinstance(sig, dict):
-                magnitude = float(sig.get('magnitude', 0.0))
-                rate      = float(sig.get('rate',      channel.signal_rate))
-                coverage  = float(sig.get('coverage',  channel.coverage))
+                magnitude        = float(sig.get('magnitude', 0.0))
+                rate             = float(sig.get('rate',      channel.signal_rate))
+                incoming_cov     = float(sig.get('coverage',  channel.coverage))
             else:
-                magnitude = float(sig)
-                rate      = channel.signal_rate
-                coverage  = channel.coverage
+                magnitude        = float(sig)
+                rate             = channel.signal_rate
+                incoming_cov     = channel.coverage
 
             # EMA update for signal_rate
             alpha    = 0.1
             new_rate = (1 - alpha) * channel.signal_rate + alpha * rate
             new_rate = float(np.clip(new_rate, 0.0, 10.0))
 
-            # Coverage update
-            new_coverage = float(np.clip(coverage, 0.0, 1.0))
+            # Coverage update gated by I: S: E × I → S'
+            # The gate blends new coverage toward current at low I, admitting
+            # fully at high I. This is not punitive — it reflects that a poorly
+            # compressed system cannot reliably incorporate novel sensing surface.
+            gated_coverage = channel.coverage + i_gate * (incoming_cov - channel.coverage)
+            new_coverage   = float(np.clip(gated_coverage, 0.0, 1.0))
 
             updated[cid] = dataclasses.replace(
                 channel,
@@ -197,31 +215,6 @@ class CausalEdge:
     lag:         int     # 0 = synchronous; lag detection future L3 axis candidate
 
 
-@dataclass
-class CompressionPattern:
-    """Placeholder — L3 axis candidate for named causal patterns."""
-    pattern_id: str
-    channels:   List[str]
-    strength:   float
-
-
-# initial grouping — to be replaced by L3 axis admission
-CHANNEL_TO_DIM: Dict[str, str] = {
-    'browser':           'S',
-    'filesystem_read':   'S',
-    'filesystem_watch':  'S',
-    'network_http':      'S',
-    'network_websocket': 'S',
-    'resource_cpu':      'A',
-    'resource_memory':   'A',
-    'os_signals':        'A',
-    'clock':             'P',
-    'clock_rate':        'P',
-    'api_llm':           'I',
-    'process_self':      'I',
-}
-
-
 class CompressionOperator:
     """
     I: {S_i} → C   Causal graph over channels.
@@ -234,12 +227,10 @@ class CompressionOperator:
 
     def __init__(self,
                  causal_graph:      Dict[Tuple[str, str], CausalEdge],
-                 pattern_library:   Dict[str, CompressionPattern],
                  residual_variance: Dict[str, float],
                  prediction_errors: deque,
                  observation_count: int):
         self.causal_graph      = causal_graph
-        self.pattern_library   = pattern_library
         self.residual_variance = residual_variance
         self.prediction_errors = prediction_errors
         self.observation_count = observation_count
@@ -253,7 +244,6 @@ class CompressionOperator:
         if len(sensing_history) < 2:
             return CompressionOperator(
                 causal_graph      = dict(self.causal_graph),
-                pattern_library   = dict(self.pattern_library),
                 residual_variance = dict(self.residual_variance),
                 prediction_errors = deque(self.prediction_errors, maxlen=self.prediction_errors.maxlen),
                 observation_count = self.observation_count,
@@ -287,18 +277,17 @@ class CompressionOperator:
                 if key in new_graph:
                     existing = new_graph[key]
                     new_weight = (1 - self.EMA_ALPHA) * existing.weight + self.EMA_ALPHA * co_movement
-                    new_conf   = min(1.0, existing.confidence + 1.0 / 200.0)
                     new_graph[key] = dataclasses.replace(
                         existing,
                         weight     = float(np.clip(new_weight, -2.0, 2.0)),
-                        confidence = new_conf,
+                        confidence = existing.confidence,  # confidence earned in SMO after full loop
                     )
                 else:
                     new_graph[key] = CausalEdge(
                         source     = src,
                         target     = tgt,
                         weight     = co_movement,
-                        confidence = 1.0 / 200.0,
+                        confidence = 0.0,   # no evidence yet — SMO will earn it
                         lag        = 0,
                     )
 
@@ -315,7 +304,6 @@ class CompressionOperator:
 
         return CompressionOperator(
             causal_graph      = new_graph,
-            pattern_library   = dict(self.pattern_library),
             residual_variance = new_residual,
             prediction_errors = deque(self.prediction_errors, maxlen=self.prediction_errors.maxlen),
             observation_count = new_obs,
@@ -328,26 +316,6 @@ class CompressionOperator:
         mean_residual   = float(np.mean(list(self.residual_variance.values()))) \
                           if self.residual_variance else 1.0
         return float(np.clip(mean_confidence * (1.0 - mean_residual), 0.0, 1.0))
-
-    def to_coupling_matrix(self) -> np.ndarray:
-        """
-        Project causal_graph to 4×4 for backward compat with SRE and Φ field.
-        initial grouping — to be replaced by L3 axis admission.
-        """
-        dims = ['S', 'I', 'P', 'A']
-        idx  = {d: i for i, d in enumerate(dims)}
-        mat  = np.zeros((4, 4))
-
-        for (src, tgt), edge in self.causal_graph.items():
-            src_dim = CHANNEL_TO_DIM.get(src)
-            tgt_dim = CHANNEL_TO_DIM.get(tgt)
-            if src_dim and tgt_dim and src_dim != tgt_dim:
-                si = idx[src_dim]
-                ti = idx[tgt_dim]
-                # Weight by confidence; EMA accumulate
-                mat[si, ti] = (mat[si, ti] + edge.weight * edge.confidence) / 2.0
-
-        return mat
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -375,15 +343,11 @@ class PredictionOperator:
 
     def __init__(self,
                  channel_predictions:  Dict[str, ChannelPrediction],
-                 edge_predictions:     Dict[Tuple[str, str], float],
                  realized_horizon:     int,
-                 prediction_accuracy:  Dict[str, float],
-                 virtual_trajectories: List):
+                 prediction_accuracy:  Dict[str, float]):
         self.channel_predictions  = channel_predictions
-        self.edge_predictions     = edge_predictions
         self.realized_horizon     = realized_horizon
         self.prediction_accuracy  = prediction_accuracy
-        self.virtual_trajectories = virtual_trajectories
 
     def apply(self, compression: CompressionOperator) -> 'PredictionOperator':
         """
@@ -423,18 +387,10 @@ class PredictionOperator:
                 error_history   = err_hist,
             )
 
-        # Update edge predictions
-        new_edge_preds = {
-            key: edge.weight * edge.confidence
-            for key, edge in compression.causal_graph.items()
-        }
-
         return PredictionOperator(
             channel_predictions  = new_predictions,
-            edge_predictions     = new_edge_preds,
             realized_horizon     = self.realized_horizon,
             prediction_accuracy  = dict(self.prediction_accuracy),
-            virtual_trajectories = list(self.virtual_trajectories),
         )
 
     def observe_outcome(self,
@@ -491,10 +447,8 @@ class PredictionOperator:
 
         updated = PredictionOperator(
             channel_predictions  = new_preds,
-            edge_predictions     = dict(self.edge_predictions),
             realized_horizon     = new_horizon,
             prediction_accuracy  = new_accuracy,
-            virtual_trajectories = list(self.virtual_trajectories),
         )
         return updated, error_dict
 
@@ -509,19 +463,17 @@ class PredictionOperator:
         Returns a channel-keyed delta dict suitable for ⟨delta, ∇Φ⟩ scoring.
         Nothing written to actual state — reversibility is structural.
 
-        v16.2.1: Primary channel influence now uses empirical data from
-        coupling_estimator when available (≥5 observations for this action).
-        Falls back to the hardcoded PRIMARY table during bootstrap.
+        Two stages:
+          1. Primary: direct channel influence from the PRIMARY prior table.
+          2. Secondary: propagate primary deltas through the causal graph.
 
-        Empirical→channel mapping:
-          coupling_estimator.affordance_deltas holds SIPA-space deltas.
-          CHANNEL_TO_DIM maps channel_id → SIPA dim.
-          Inverse: distribute each SIPA delta across its channels,
-          weighted by current channel coverage.
-
-        Two stages (unchanged):
-          1. Primary: direct channel influence (empirical or prior).
-          2. Secondary: propagate through causal graph.
+        The empirical coupling_estimator branch (v16.2.1) has been removed.
+        That branch read SIPA-space affordance deltas and projected them back
+        through an inverse CHANNEL_TO_DIM mapping — reversing the causal
+        direction (channels produce SIPA; SIPA cannot reconstruct channels).
+        Empirical grounding requires Reality to emit per-channel deltas
+        directly; that is a future addition. PRIMARY is the only source
+        until then. coupling_estimator parameter retained for call-site compat.
         """
         PRIMARY: Dict[str, Dict[str, float]] = {
             'navigate':    {'browser': 0.1, 'network_http': 0.05, 'network_dns': 0.02},
@@ -541,40 +493,7 @@ class PredictionOperator:
             'query_agent': {},
         }
 
-        primary: Dict[str, float] = {}
-
-        if (coupling_estimator is not None
-                and len(coupling_estimator.affordance_deltas.get(
-                    candidate_action, [])) >= 5):
-
-            obs       = coupling_estimator.affordance_deltas[candidate_action]
-            dims      = ['S', 'I', 'P', 'A']
-            mean_sipa = {
-                d: float(np.mean([o.get(d, 0.0) for o in obs]))
-                for d in dims
-            }
-
-            dim_to_channels: Dict[str, List[str]] = {}
-            for cid, dim in CHANNEL_TO_DIM.items():
-                dim_to_channels.setdefault(dim, []).append(cid)
-
-            channels = sensing.channels
-            for dim, sipa_delta in mean_sipa.items():
-                if abs(sipa_delta) < 1e-8:
-                    continue
-                ch_ids    = dim_to_channels.get(dim, [])
-                coverages = {cid: channels[cid].coverage
-                             for cid in ch_ids if cid in channels}
-                total_cov = sum(coverages.values())
-                if total_cov < 1e-8:
-                    for cid in ch_ids:
-                        if cid in channels:
-                            primary[cid] = primary.get(cid, 0.0) + sipa_delta / max(len(ch_ids), 1)
-                else:
-                    for cid, cov in coverages.items():
-                        primary[cid] = primary.get(cid, 0.0) + sipa_delta * (cov / total_cov)
-        else:
-            primary = dict(PRIMARY.get(candidate_action, {}))
+        primary: Dict[str, float] = dict(PRIMARY.get(candidate_action, {}))
 
         delta: Dict[str, float] = dict(primary)
         for src, magnitude in primary.items():
@@ -597,37 +516,44 @@ class PredictionOperator:
         From the invariant: ∃ operator P: C → C' such that predicted ΔC
         remains bounded and reversible.
 
-        Bounded ΔC   → prediction_accuracy: per-channel EMA of (1 - error).
-                        How closely predicted deltas match observed ones.
-                        Computed by observe_outcome() every step.
+        Two phases based on whether accuracy evidence exists:
 
-        Reversibility → realized_horizon: mean steps ahead where predictions
-                        stay below NOISE_FLOOR without compounding error.
-                        Computed by observe_outcome() every step.
+        Bootstrap (no accuracy evidence yet):
+          Returns horizon_norm alone. At step 1, realized_horizon = 50 (max),
+          so P = 1.0 — all futures are open, nothing has been ruled out.
+          This correctly represents maximum optionality, not overconfidence:
+          accuracy is 0 (no predictions verified), but horizon is maximal
+          (no futures have been eliminated by error either).
+          As observe_outcome() accumulates errors, per-channel horizons
+          decline where predictions fail, and the formula transitions to
+          the evidence-weighted phase.
 
-        P = mean_accuracy × (0.5 + 0.5 × horizon_norm)
+        Evidence phase (accuracy observations present):
+          P = mean_accuracy × (0.5 + 0.5 × horizon_norm)
           Both factors required for high P:
             accurate over short horizon  = moderate P (can predict one step)
             accurate over long horizon   = high P     (bounded multi-step)
           This matches the invariant: bounded AND reversible.
 
-        P starts at 0 at bootstrap — a fresh system with no causal history
-        has no prediction quality. P is earned through observe_outcome().
-
-        Previous implementation (v16.0-v16.2.1) computed sensing-surface
-        volume from Σ_P eigenvalues — S-space, not C-space. That made P
-        track S directly, violating the S→I→P→A independence requirement.
+        CRK note:
+          C3 (non-internalization) fires on failure outcomes degrading A,
+          not on low bootstrap accuracy — early P is not a failure state.
+          C4 (reality) fires on false confidence, not on high horizon at
+          bootstrap — open optionality is epistemically correct.
         """
         active_acc = [
             acc for cid, acc in self.prediction_accuracy.items()
             if sensing.channels.get(cid) and sensing.channels[cid].active
         ]
+
+        horizon_norm = float(np.clip(self.realized_horizon / 50.0, 0.0, 1.0))
+
         if not active_acc:
-            return 0.0   # bootstrap: no predictions made yet
+            # Bootstrap: no accuracy evidence yet.
+            # P's value to A is purely optionality — all futures are open.
+            return horizon_norm
 
         mean_accuracy = float(np.mean(active_acc))
-        horizon_norm  = float(np.clip(self.realized_horizon / 50.0, 0.0, 1.0))
-
         return float(np.clip(mean_accuracy * (0.5 + 0.5 * horizon_norm), 0.0, 1.0))
 
     # ── v16 additions ─────────────────────────────────────────────────────────
@@ -782,14 +708,19 @@ class CoherenceOperator:
                      None → smo_consistency = 1.0 (bootstrap fallback).
         Returns new CoherenceOperator — does not mutate.
         """
-        # ── s_i: S→I — unchanged ─────────────────────────────────────────────
+        # ── s_i: S→I ─────────────────────────────────────────────────────────
+        # Fraction of active sensing channels that appear in the causal graph.
+        # Bootstrap: empty graph means nothing is inconsistent yet — not that
+        # everything has failed. s_i = 1.0 until graph has edges to measure against.
         active_cids = {cid for cid, ch in sensing.channels.items() if ch.active}
-        graph_cids  = set()
-        for (src, tgt) in compression.causal_graph:
-            graph_cids.add(src)
-            graph_cids.add(tgt)
-
-        s_i = len(active_cids & graph_cids) / len(active_cids) if active_cids else 0.0
+        if not compression.causal_graph:
+            s_i = 1.0   # bootstrap: no graph → no inconsistency
+        else:
+            graph_cids  = set()
+            for (src, tgt) in compression.causal_graph:
+                graph_cids.add(src)
+                graph_cids.add(tgt)
+            s_i = len(active_cids & graph_cids) / len(active_cids) if active_cids else 0.0
 
         # ── i_p: I→P — unchanged ─────────────────────────────────────────────
         confident_edges = {
@@ -1201,16 +1132,32 @@ class SelfModifyingOperator:
                     -self.EPSILON, self.EPSILON
                 ))
                 new_weight = float(np.clip(edge.weight + weight_delta, -2.0, 2.0))
+
+                # Confidence earned from Reality-grounded prediction error.
+                # tgt_error comes from P.observe_outcome() — the difference
+                # between what P predicted and what S actually measured.
+                # The loop must close (S->I->P->A->SMO->S) before confidence
+                # is updated; I cannot assess itself. An edge becomes confident
+                # only when it has contributed to accurate predictions that
+                # Reality has subsequently confirmed.
+                prediction_accuracy = 1.0 - min(1.0, tgt_error)
+                new_conf = float(np.clip(
+                    (1 - alpha) * edge.confidence + alpha * prediction_accuracy,
+                    0.0, 1.0
+                ))
             else:
+                # No signal this cycle — loop completed but reality didn't speak
+                # on this edge. Confidence neither earned nor lost.
                 new_weight   = edge.weight
                 weight_delta = 0.0
+                new_conf     = edge.confidence
 
             total_delta += abs(weight_delta)
 
             updated_graph[key] = dataclasses.replace(
                 edge,
                 weight     = new_weight,
-                confidence = min(1.0, edge.confidence + 0.001)
+                confidence = new_conf,
             )
 
         delta_norm = total_delta / max(len(compression.causal_graph), 1)
@@ -1219,7 +1166,6 @@ class SelfModifyingOperator:
         return (
             CompressionOperator(
                 causal_graph      = updated_graph,
-                pattern_library   = dict(compression.pattern_library),
                 residual_variance = dict(compression.residual_variance),
                 prediction_errors = deque(compression.prediction_errors,
                                           maxlen=compression.prediction_errors.maxlen),
