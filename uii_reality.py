@@ -1,26 +1,24 @@
 """
-UII v16 — uii_reality.py
+UII v16.4 — uii_reality.py
 Perturbation Harnessing
 
 Role: Reality is the authoritative, non-optimizing source of perturbations.
-It executes actions and returns measured deltas — nothing more.
+It executes actions and returns measured channel snapshots — nothing more.
 The browser is a low-fidelity viewport into a slice of reality.
 
-v16 changes (import swap only):
-  - from uii_geometry import ... (replaces uii_types)
-  - CouplingMatrixEstimator.to_ledger_entry() / from_ledger_entry()
-    (renamed from to_genome_entry / from_genome_entry — genome terminology dead)
-  - Inline SubstrateState import updated to uii_geometry
-  - No LatentDeathClock import (lives in uii_geometry as DeathClock)
-  - All execution logic, delta computation, and DOM measurement unchanged
+v16.4 changes:
+  - measure_channels() added: pre/post channel snapshots per action
+  - execute() returns (pre_channels, post_channels, context)
+  - _build_channel_probes() and _CHANNEL_PROBES moved here from uii_triad
+  - Channel signals flow directly to SensingOperator — no SIPA intermediary
 
 Also contains:
-  - CouplingMatrixEstimator (empirical S/I/P/A co-movement — learns from reality)
+  - CouplingMatrixEstimator (empirical co-movement — learns from reality)
   - BrowserRealityAdapter (Playwright-based reality interface)
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional, Set
+from typing import Dict, List, Tuple, Optional, Set, Callable
 import numpy as np
 import copy
 import time
@@ -36,9 +34,154 @@ from uii_geometry import (
     AgentHandler, AVAILABLE_AGENTS,
 )
 
-# ============================================================
-# COUPLING MATRIX ESTIMATOR
-# ============================================================
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Channel probe registry — moved from uii_triad
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _build_channel_probes() -> Dict[str, Callable]:
+    """
+    One-time construction of the channel probe registry.
+    Each entry maps a channel_id to a zero-arg callable returning
+    {magnitude, rate, coverage} or None if unavailable on this substrate.
+
+    Hardware-dependent channels (audio_in, serial_port, display, video_in) have
+    no probe — they stay dark unless fed by an external adapter.
+    Context-dependent channels (browser, api_llm, ssh_remote) are handled
+    separately in measure_channels() since their signal derives from action
+    outcomes, not system introspection.
+
+    All probes are silent on failure — a substrate that can't supply a reading
+    simply leaves that channel dark this step.
+    """
+    import gc as _gc
+    import os as _os
+    import sys as _sys
+
+    probes: Dict[str, Callable] = {}
+
+    # ── Always available ──────────────────────────────────────────────────────
+    probes['clock']          = lambda: {'magnitude': 1.0, 'rate': 1.0, 'coverage': 1.0}
+    probes['clock_rate']     = lambda: {'magnitude': 1.0, 'rate': 1.0, 'coverage': 1.0}
+    probes['os_signals']     = lambda: {'magnitude': 0.0, 'rate': 0.0, 'coverage': 1.0}
+    probes['entropy_source'] = lambda: {'magnitude': 0.0, 'rate': 0.0, 'coverage': 1.0}
+    probes['env_vars']       = lambda: {
+        'magnitude': min(len(_os.environ) / 100.0, 1.0), 'rate': 0.0, 'coverage': 1.0,
+    }
+    probes['gc_pressure']    = lambda: (lambda c: {
+        'magnitude': min((c[0] / 700.0 + c[1] / 70.0 + c[2] / 10.0) / 3.0, 1.0),
+        'rate': 1.0, 'coverage': 1.0,
+    })(_gc.get_count())
+
+    # ── stdin — non-blocking check ────────────────────────────────────────────
+    def _stdin() -> Optional[Dict]:
+        try:
+            import select
+            ready = bool(select.select([_sys.stdin], [], [], 0.0)[0])
+            return {'magnitude': float(ready), 'rate': float(ready), 'coverage': 1.0}
+        except Exception:
+            return None
+    probes['stdin'] = _stdin
+
+    # ── psutil block — graceful no-op if not installed ────────────────────────
+    try:
+        import psutil as _ps
+        _proc = _ps.Process()
+
+        probes['resource_cpu']     = lambda: {'magnitude': _ps.cpu_percent() / 100.0,            'rate': 1.0, 'coverage': 1.0}
+        probes['resource_memory']  = lambda: {'magnitude': _ps.virtual_memory().percent / 100.0,  'rate': 1.0, 'coverage': 1.0}
+        probes['resource_swap']    = lambda: {'magnitude': _ps.swap_memory().percent / 100.0,     'rate': 1.0, 'coverage': 1.0}
+        probes['resource_disk']    = lambda: {'magnitude': _ps.disk_usage('/').percent / 100.0,   'rate': 1.0, 'coverage': 1.0}
+        probes['process_self']     = lambda: {'magnitude': _proc.memory_percent() / 100.0,        'rate': 1.0, 'coverage': 1.0}
+        probes['process_threads']  = lambda: {'magnitude': min(_proc.num_threads() / 50.0, 1.0),  'rate': 1.0, 'coverage': 1.0}
+        probes['process_children'] = lambda: {
+            'magnitude': min(len(_proc.children()) / 10.0, 1.0),
+            'rate':      float(len(_proc.children()) > 0),
+            'coverage':  1.0,
+        }
+
+        def _fd() -> Optional[Dict]:
+            try:
+                return {'magnitude': min(_proc.num_fds() / 1024.0, 1.0), 'rate': 1.0, 'coverage': 1.0}
+            except AttributeError:
+                return None
+        probes['resource_fd'] = _fd
+
+        def _thermal() -> Optional[Dict]:
+            try:
+                t = _ps.sensors_temperatures()
+                if t:
+                    vals = [x.current for readings in t.values() for x in readings]
+                    return {'magnitude': min(max(vals) / 100.0, 1.0), 'rate': 1.0, 'coverage': 1.0}
+            except Exception:
+                pass
+            return None
+        probes['resource_thermal'] = _thermal
+
+        def _battery() -> Optional[Dict]:
+            try:
+                b = _ps.sensors_battery()
+                if b:
+                    return {
+                        'magnitude': b.percent / 100.0,
+                        'rate':      float(not b.power_plugged),
+                        'coverage':  1.0,
+                    }
+            except Exception:
+                pass
+            return None
+        probes['resource_battery'] = _battery
+
+        def _net_if() -> Optional[Dict]:
+            try:
+                stats = _ps.net_if_stats()
+                up = sum(1 for s in stats.values() if s.isup)
+                return {'magnitude': up / max(len(stats), 1), 'rate': 1.0, 'coverage': 1.0}
+            except Exception:
+                return None
+        probes['network_interface'] = _net_if
+
+        def _net_bw() -> Optional[Dict]:
+            try:
+                c = _ps.net_io_counters()
+                if c:
+                    return {'magnitude': min((c.bytes_sent + c.bytes_recv) / 1e9, 1.0), 'rate': 1.0, 'coverage': 1.0}
+            except Exception:
+                pass
+            return None
+        probes['network_bandwidth'] = _net_bw
+
+        def _disk_io() -> Optional[Dict]:
+            try:
+                c = _ps.disk_io_counters()
+                if c:
+                    return {'magnitude': min((c.read_bytes + c.write_bytes) / 1e9, 1.0), 'rate': 1.0, 'coverage': 1.0}
+            except Exception:
+                pass
+            return None
+        probes['filesystem_io'] = _disk_io
+
+        def _syslog() -> Optional[Dict]:
+            import os as _o
+            path = '/var/log/syslog'
+            if _o.path.exists(path):
+                return {'magnitude': min(_o.path.getsize(path) / 1e7, 1.0), 'rate': 1.0, 'coverage': 1.0}
+            return None
+        probes['system_logs'] = _syslog
+
+    except ImportError:
+        pass
+
+    return probes
+
+
+# Built once at import time. Probes are stateless callables, safe to share.
+_CHANNEL_PROBES: Dict[str, Callable] = _build_channel_probes()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CouplingMatrixEstimator
+# ──────────────────────────────────────────────────────────────────────────────
 
 class CouplingMatrixEstimator:
     """
@@ -177,7 +320,6 @@ class BrowserRealityAdapter(RealityAdapter):
         self.headless = headless
         self.start_url = start_url
 
-        self.previous_dom_metrics: Optional[Dict] = None
         self.initialized: bool = False
         self._ever_navigated: bool = False
 
@@ -367,92 +509,64 @@ class BrowserRealityAdapter(RealityAdapter):
                 'scroll_height': 0, 'viewport_height': 0, 'url': '', 'title': ''
             }
 
-    def _compute_substrate_delta(self, before: Dict, after: Dict,
-                                  state: 'SubstrateState' = None) -> Dict[str, float]:
+    def measure_channels(self, context: Dict = None) -> Dict:
         """
-        Compute substrate delta from environmental measurement.
+        Measure all available S channels at this moment in Reality.
 
-        Returns S and P deltas only. I is computed by MentatTriad._compute_delta_i()
-        from the Triad's trace — compression quality of S history is a Triad-level
-        observation, not a browser-level measurement.
+        Calls every probe in _CHANNEL_PROBES (system-level: cpu, memory,
+        gc, clock, etc.). Adds browser channel from live DOM state.
+        Adds api_llm and ssh_remote from context when provided.
 
-        DASS causal chain:
-            S: E × I → S'   Environmental surface change, gated by current I.
-                             Current I is in state — passed in, not computed here.
-            P: C → C'       Environmental volatility with soft I-support term.
-            I: 0.0          Computed in MentatTriad.step() via _compute_delta_i().
-            A: 0.0          Computed in MentatTriad._compute_a().
+        Called twice per execute(): before the action (pre_channels) and
+        after (post_channels). The delta between them is what I compresses
+        into causal graph edges — which channels co-move with which actions.
 
-        No SMO signals (rigidity, prediction_error) enter this method.
-        U is downstream of S, I, P. The causal chain does not run backward.
+        Returns channel-keyed dict: {channel_id: {magnitude, rate, coverage}}
+        Native language of SensingOperator. No SIPA translation.
         """
-        if state is None:
-            from uii_geometry import SubstrateState as _SS
-            state = _SS(S=0.5, I=0.5, P=0.5, A=0.7)
+        import os
+        signal: Dict = {}
 
-        delta = {'S': 0.0, 'I': 0.0, 'P': 0.0, 'A': 0.0}
+        # ── System probes ─────────────────────────────────────────────────────
+        for cid, probe in _CHANNEL_PROBES.items():
+            try:
+                result = probe()
+                if result is not None:
+                    signal[cid] = result
+            except Exception:
+                pass
 
-        # ── S: Environmental surface change, gated by current I ─────────────
-        #
-        # Spec: S: E × I → S'
-        # E = change in interactive surface fraction (normalized, not raw counts)
-        # I = current integration quality — already in state, passed in
-        #
-        # i_gate: at I=0 → 50% of signal admitted. At I=1 → 100%.
-        # Low I reflects that less compressed structure is available to make
-        # sense of new sensing. Structural, not punitive.
-        current_surface = after['interactive_count'] / max(after['element_count'], 1)
-        prev_surface    = before['interactive_count'] / max(before['element_count'], 1)
-        surface_delta   = current_surface - prev_surface
+        # ── Browser channel — live DOM state ──────────────────────────────────
+        try:
+            dom = self._measure_dom_state()
+            elem_count           = max(dom.get('element_count', 1), 1)
+            interactive_fraction = dom.get('interactive_count', 0) / elem_count
+            viewport_fraction    = min(
+                1.0,
+                dom.get('viewport_height', 0) / max(dom.get('scroll_height', 1), 1)
+            )
+            signal['browser'] = {
+                'magnitude': float(np.clip(interactive_fraction, 0.0, 1.0)),
+                'rate':      float(np.clip(interactive_fraction, 0.0, 1.0)),
+                'coverage':  float(np.clip(viewport_fraction,    0.0, 1.0)),
+            }
+        except Exception:
+            pass
 
-        viewport_coverage = min(1.0, after['viewport_height'] / max(after['scroll_height'], 1))
-        prev_viewport     = min(1.0, before['viewport_height'] / max(before['scroll_height'], 1))
-        coverage_delta    = viewport_coverage - prev_viewport
+        # ── Context-derived channels (action outcomes) ────────────────────────
+        if context is not None:
+            signal['api_llm'] = {
+                'magnitude': float(np.clip(
+                    context.get('llm_tokens_used', 0) / 1000.0, 0.0, 1.0)),
+                'rate':      float(context.get('llm_called', False)),
+                'coverage':  1.0,
+            }
+            if context.get('migrate_outcome') in ('spawn_attempted', 'handshake_received'):
+                handshake_path = context.get('handshake_path', '/tmp/uii_handshake')
+                if os.path.exists(handshake_path):
+                    signal['ssh_remote'] = {'magnitude': 1.0, 'rate': 1.0, 'coverage': 1.0}
 
-        env_signal = 0.7 * surface_delta + 0.3 * coverage_delta
-        i_gate     = 0.5 + 0.5 * state.I   # [0.5, 1.0]
-
-        delta['S'] = float(np.clip(env_signal * i_gate, -0.1, 0.1))
-        # Noise on S only — environmental sensing has measurement noise.
-        # Noise on I would be incoherent: I is a derived compression measure.
-        delta['S'] += float(np.random.uniform(-0.005, 0.005))
-
-        # ── I: 0.0 — computed in MentatTriad._compute_delta_i() ─────────────
-        # I: {S_i} → C   Compression quality of S history.
-        # The browser does not have S history. The Triad does.
-        # delta['I'] stays 0.0 — merged by step() before apply_delta().
-
-        # ── P: Environmental volatility with soft I-support ─────────────────
-        #
-        # Spec: P: C → C'   Compressed state → forward model.
-        # C is produced by I. When I is very low, less compressed structure
-        # is available to project forward from. The I-support term is a soft
-        # signal [-0.02, +0.02] — not a ceiling (the PhiField grounding
-        # invariant provides the hard ceiling on P separately).
-        structural_delta = abs(after['element_count'] - before['element_count']) / max(before['element_count'], 1)
-        text_delta       = abs(after['text_length']   - before['text_length'])   / max(before['text_length'], 1)
-        volatility       = float(np.mean([structural_delta, text_delta]))
-        self.volatility_history.append(volatility)
-
-        if len(self.volatility_history) >= 5:
-            volatility_variance = float(np.var(list(self.volatility_history)[-5:]))
-            env_p = float(np.clip(0.1 - volatility_variance * 10.0, -0.1, 0.1))
-        else:
-            env_p = float(np.clip(-volatility * 0.5, -0.1, 0.1))
-
-        # Soft I-support: below I=0.5, less compressed structure for P to use.
-        i_support      = float(np.clip(state.I - 0.5, -0.5, 0.5))
-        i_contribution = 0.04 * i_support   # [-0.02, +0.02]
-        delta['P']     = float(np.clip(env_p + i_contribution, -0.1, 0.1))
-
-        # URL change: forward model loses its reference frame.
-        if after.get('url', '') != before.get('url', ''):
-            delta['P'] -= 0.08
-
-        # ── A: 0.0 — computed in MentatTriad._compute_a() ───────────────────
-        # Requires Triad context (operator geometry, trace). Not Reality's job.
-
-        return delta
+        return signal
 
     def _classify_error(self, e: Exception) -> str:
         """Classify Reality's refusal type."""
@@ -466,20 +580,25 @@ class BrowserRealityAdapter(RealityAdapter):
         return 'unknown'
 
     def execute(self, action: Dict, boundary_pressure: float = 0.0,
-                state: 'SubstrateState' = None,
-                coupling_confidence: float = 0.0) -> Tuple[Dict[str, float], Dict]:
+                coupling_confidence: float = 0.0) -> Tuple[Dict, Dict, Dict]:
         """
-        Execute action in Reality and return MEASURED perturbation delta.
+        Execute action in Reality.
+        Returns (pre_channels, post_channels, context).
 
-        v13.4: Python affordance ungated.
-        v14: response_latency_ms added to context for ResidualTracker.
+        pre_channels:  channel snapshot before the action  — S baseline
+        post_channels: channel snapshot after the action   — S new state
+        context:       DOM metrics, latency, outcome metadata
+
+        The delta (post - pre) is what I compresses into causal edges.
+        pre and post flow directly to SensingOperator — no SIPA intermediary.
         """
-        t_start = time.time()  # v14: for response_latency_ms signal
+        t_start = time.time()
 
         action_type = action.get('type', 'observe')
         params = action.get('params', {})
 
         before_metrics = self._measure_dom_state()
+        pre_channels   = self.measure_channels()          # S snapshot before
         action_succeeded = True
 
         try:
@@ -566,35 +685,23 @@ class BrowserRealityAdapter(RealityAdapter):
             error_type = self._classify_error(e)
 
             if error_type in ['rate_limit', 'token_exhaustion', 'timeout']:
-                return (
-                    {'S': 0, 'I': 0, 'P': 0, 'A': 0},
-                    {
-                        'refusal': True,
-                        'recoverable': error_type != 'token_exhaustion',
-                        'reason': error_type,
-                        'interaction_surface_available': error_type == 'timeout',
-                        'boundary_pressure': boundary_pressure,
-                        'before': before_metrics,
-                        'after': before_metrics,
-                        'response_latency_ms': (time.time() - t_start) * 1000,
-                    }
-                )
+                error_context = {
+                    'refusal': True,
+                    'recoverable': error_type != 'token_exhaustion',
+                    'reason': error_type,
+                    'interaction_surface_available': error_type == 'timeout',
+                    'boundary_pressure': boundary_pressure,
+                    'before': before_metrics,
+                    'after': before_metrics,
+                    'response_latency_ms': (time.time() - t_start) * 1000,
+                }
+                # On error post = pre — nothing changed from S's perspective
+                return pre_channels, pre_channels, error_context
 
             action_succeeded = False
 
         response_latency_ms = (time.time() - t_start) * 1000
         after_metrics = self._measure_dom_state()
-        delta = self._compute_substrate_delta(
-         before_metrics, after_metrics,
-         state=state,
-     )
-
-        # v15: S damping removed. S must report reality as-is at all pressures.
-        # High boundary pressure is precisely when the Triad most needs accurate
-        # environmental sensing to find escape routes. Damping S under pressure
-        # inverts the correct urgency response and degrades coupling matrix accuracy
-        # at the moment SRE needs it most. Phi field and CRK constraints handle
-        # coherence — S does not need external damping.
 
         context = {
             'before': before_metrics,
@@ -605,12 +712,11 @@ class BrowserRealityAdapter(RealityAdapter):
             'url_changed': before_metrics['url'] != after_metrics['url'],
             'new_url': after_metrics['url'],
             'page_title': after_metrics['title'],
-            'response_latency_ms': (time.time() - t_start) * 1000,  # v14
+            'response_latency_ms': response_latency_ms,
         }
 
-        self.previous_dom_metrics = after_metrics
-
-        return delta, context
+        post_channels = self.measure_channels(context=context)   # S snapshot after
+        return pre_channels, post_channels, context
     
     def execute_trajectory(self, trajectory: List[Dict]) -> Tuple[List[Dict], bool]:
         """
@@ -659,8 +765,10 @@ class BrowserRealityAdapter(RealityAdapter):
         triad_id = params.get('triad_id', 'default')
         agent.post_query(triad_id, query_text)
 
+        channels = self.measure_channels()
         return (
-            {'S': 0.01, 'I': 0, 'P': 0, 'A': 0.01},
+            channels,
+            channels,
             {
                 'before': before_metrics,
                 'after': before_metrics,
@@ -692,8 +800,12 @@ class BrowserRealityAdapter(RealityAdapter):
             exec(code, exec_globals, exec_locals)
             result = exec_locals.get('result', None)
 
+            # Python execution may affect process/filesystem channels —
+            # measure post-execution state to capture any changes
+            post_channels = self.measure_channels()
             return (
-                {'S': 0, 'I': 0.02, 'P': 0, 'A': 0},
+                self.measure_channels(),   # pre (re-measure for accuracy)
+                post_channels,
                 {
                     'before': before_metrics,
                     'after': before_metrics,
@@ -705,8 +817,10 @@ class BrowserRealityAdapter(RealityAdapter):
             )
 
         except Exception as e:
+            channels = self.measure_channels()
             return (
-                {'S': 0, 'I': 0, 'P': 0, 'A': 0},
+                channels,
+                channels,
                 {
                     'before': before_metrics,
                     'after': before_metrics,
@@ -836,27 +950,6 @@ class BrowserRealityAdapter(RealityAdapter):
             'migrate_outcome':  outcome,
         }
         return delta, ctx
-        """Execute entire trajectory, returning perturbation trace."""
-        perturbation_trace = []
-
-        for i, action in enumerate(trajectory):
-            try:
-                normalized_action = {
-                    'type': action.get('action_type', action.get('type', 'observe')),
-                    'params': action.get('parameters', action.get('params', {}))
-                }
-
-                delta, context = self.execute(normalized_action)
-                perturbation_trace.append({'delta': delta, 'context': context, 'step': i})
-            except Exception as e:
-                perturbation_trace.append({
-                    'delta': {'S': 0, 'I': 0, 'P': 0, 'A': 0},
-                    'context': {'error': str(e), 'failed_step': i},
-                    'step': i
-                })
-                return perturbation_trace, False
-
-        return perturbation_trace, True
 
     def close(self):
         """Cleanup browser resources."""

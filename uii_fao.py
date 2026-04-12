@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-UII v16 — uii_fao.py
+UII v16.3 — uii_fao.py
 Failure Assimilation Operator & Residual Learning
 
 Role: FAO is the legal mechanism by which session learning informs the Ledger's
@@ -9,31 +9,12 @@ causal model. It operates on ledger.causal_model and ledger.discovered_structure
 Input: observable signals only (Φ delta, CRK violation types, trajectory outcomes).
 Output: updated TriadLedger. Never action selection.
 
-v16 changes vs v15.3:
-  - Imports: uii_geometry (replaces uii_types); uii_ledger.TriadLedger (replaces
-    uii_genome.TriadGenome). ProvisionalAxisManager moves here from uii_genome.py.
-  - distill_to_ledger() replaces distill_to_genome():
-      · No genome parameter — TriadLedger passed in directly.
-      · Layer 1 (scalar velocity targets) eliminated entirely.
-      · Layer 1b (operator geometry scalars) eliminated — live in operator_snapshot,
-        written by PeakOptionalityTracker.update() during the run, not here.
-      · CAM parameter eliminated — reads coupling_estimator.affordance_deltas directly.
-      · Does NOT touch ledger.hessian_snapshot or ledger.operator_snapshot.
-        Those are written exclusively by PeakOptionalityTracker.update() during step().
-      · Layer 2, 3 logic unchanged from v15.3.
-  - get_informed_ledger() replaces get_informed_genome():
-      · No Layer 1 mutation. Returns ledger copy with updated causal_model and
-        discovered_structure only.
-  - FailureAssimilationOperator.mutation_bias: genome_sigma key removed (Layer 1 dead).
-    coupling_weights and perturbation_emphasis retained.
-
-Also contains (unchanged from v15.3):
+Contains:
   - ResidualTracker
   - ResidualExplainer
   - AxisAdmissionTest
-  - ProvisionalAxisManager (moved here from uii_genome.py — its only user)
-  - classify_relation_failure
-  - FailureAssimilationOperator
+  - ProvisionalAxisManager
+  - FailureAssimilationOperator (distill_to_ledger)
 """
 
 from dataclasses import dataclass, asdict
@@ -541,51 +522,6 @@ class AxisAdmissionTest:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# classify_relation_failure — unchanged from v15.3
-# ──────────────────────────────────────────────────────────────────────────────
-
-def classify_relation_failure(trajectories: List,
-                               committed_success: bool,
-                               violations:        List,
-                               phi_delta:         float) -> Optional[Dict]:
-    """Extract semantic failure pattern from Relation enumeration."""
-    if committed_success:
-        return None
-
-    failure_type = "unknown"
-    severity     = 1.0
-
-    if not trajectories or len(trajectories) == 0:
-        failure_type = "enumeration_failed"
-        severity     = 2.0
-
-    elif violations and len(violations) > 0:
-        violation_types = [v[0] for v in violations]
-        if 'C2_optionality' in violation_types:
-            failure_type, severity = "optionality_collapse", 1.5
-        elif 'C4_reality_contact' in violation_types:
-            failure_type, severity = "state_instability", 1.3
-        elif 'C7_global_coherence' in violation_types:
-            failure_type, severity = "coherence_drift", 1.4
-        else:
-            failure_type, severity = "closure_violation", 1.2
-
-    elif phi_delta < -0.2:
-        failure_type, severity = "coherence_drift", 1.6
-
-    else:
-        failure_type, severity = "serialization_failed", 1.0
-
-    return {
-        'type':            failure_type,
-        'severity':        severity,
-        'phi_delta':       phi_delta,
-        'violation_count': len(violations) if violations else 0,
-        'timestamp':       time.time(),
-    }
-
-
-# ──────────────────────────────────────────────────────────────────────────────
 # FailureAssimilationOperator — v16
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -593,78 +529,14 @@ class FailureAssimilationOperator:
     """
     Translates session learning into Ledger geometry.
 
-    v16 changes:
-      - genome_sigma removed from mutation_bias (Layer 1 dead).
-      - get_informed_ledger() replaces get_informed_genome() —
-        no Layer 1 scalar mutation; copies ledger with updated causal_model
-        and discovered_structure only.
-      - distill_to_ledger() replaces distill_to_genome() — accepts TriadLedger
-        directly, no genome parameter, no CAM parameter.
-      - assimilate_relation_failure() retained as no-op (backward compat).
-      - coupling_weights and perturbation_emphasis unchanged.
+    Writes causal_model and discovered_structure at session end.
+    Never touches hessian_snapshot or operator_snapshot — owned by PeakOptionalityTracker.
     """
 
     def __init__(self, memory_decay: float = 0.95, inheritance_noise: float = 0.1):
         self.failure_history: deque = deque(maxlen=50)
         self.memory_decay      = memory_decay
         self.inheritance_noise = inheritance_noise
-
-        # genome_sigma removed — Layer 1 scalars dead.
-        # coupling_weights and perturbation_emphasis retained.
-        self.mutation_bias = {
-            'coupling_weights': {
-                'smo_rigidity':        1.0,
-                'phi_alpha':           1.0,
-                'phi_beta':            1.0,
-                'phi_gamma':           1.0,
-                'phi_A0':              1.0,
-            },
-            'perturbation_emphasis': {
-                'S': 1.0,
-                'I': 1.0,
-                'P': 1.0,
-                'A': 1.0,
-            },
-        }
-
-        self.min_weight = 0.5
-        self.max_weight = 3.0
-
-        self.total_failures_assimilated = 0
-        self.bias_update_count          = 0
-
-    def assimilate_relation_failure(self, failure_record: Dict):
-        """
-        No-op. Retained for backward compatibility with v14 log readers.
-        In v16 session outcomes feed CouplingMatrixEstimator directly via update().
-        """
-        pass
-
-    def _apply_decay(self):
-        for coupling in self.mutation_bias['coupling_weights']:
-            current  = self.mutation_bias['coupling_weights'][coupling]
-            baseline = 1.0
-            self.mutation_bias['coupling_weights'][coupling] = (
-                baseline + (current - baseline) * self.memory_decay
-            )
-        for dim in self.mutation_bias['perturbation_emphasis']:
-            current  = self.mutation_bias['perturbation_emphasis'][dim]
-            baseline = 1.0
-            self.mutation_bias['perturbation_emphasis'][dim] = (
-                baseline + (current - baseline) * self.memory_decay
-            )
-
-    def _enforce_bounds(self):
-        for coupling in self.mutation_bias['coupling_weights']:
-            self.mutation_bias['coupling_weights'][coupling] = float(np.clip(
-                self.mutation_bias['coupling_weights'][coupling],
-                self.min_weight, self.max_weight
-            ))
-        for dim in self.mutation_bias['perturbation_emphasis']:
-            self.mutation_bias['perturbation_emphasis'][dim] = float(np.clip(
-                self.mutation_bias['perturbation_emphasis'][dim],
-                self.min_weight, self.max_weight
-            ))
 
     def get_informed_ledger(self, ledger: TriadLedger) -> TriadLedger:
         """
@@ -678,52 +550,6 @@ class FailureAssimilationOperator:
         """
         return copy.deepcopy(ledger)
 
-    def get_biased_coupling_mutation(self, coupling_name: str,
-                                      current_value: float) -> float:
-        """Apply learned bias to coupling mutation. Unchanged from v15.3."""
-        weight    = self.mutation_bias['coupling_weights'].get(coupling_name, 1.0)
-        base_sigma = 0.01
-        sigma     = base_sigma * weight
-        noise     = np.random.normal(0, sigma)
-        mutated   = current_value + noise
-        return float(np.clip(mutated,
-                              max(0, current_value - 0.05),
-                              min(1, current_value + 0.05)))
-
-    def get_perturbation_weights(self) -> Dict[str, float]:
-        """Return learned perturbation emphasis for optionality sampling."""
-        return self.mutation_bias['perturbation_emphasis'].copy()
-
-    def serialize_for_child(self) -> Dict:
-        """FAO state persistence — child inherits learned bias WITH NOISE."""
-        noisy_bias = copy.deepcopy(self.mutation_bias)
-        for coupling in noisy_bias['coupling_weights']:
-            noise_factor = np.random.normal(1.0, self.inheritance_noise)
-            noisy_bias['coupling_weights'][coupling] = float(np.clip(
-                noisy_bias['coupling_weights'][coupling] * noise_factor,
-                self.min_weight, self.max_weight
-            ))
-        return {
-            'mutation_bias':      noisy_bias,
-            'failure_count':      len(self.failure_history),
-            'total_assimilated':  self.total_failures_assimilated,
-            'bias_updates':       self.bias_update_count,
-            'memory_decay':       self.memory_decay,
-            'inheritance_noise':  self.inheritance_noise,
-        }
-
-    @classmethod
-    def from_serialized(cls, serialized: Dict) -> 'FailureAssimilationOperator':
-        """Reconstruct FAO from serialized learned bias."""
-        fao = cls(
-            memory_decay      = serialized.get('memory_decay',       0.95),
-            inheritance_noise = serialized.get('inheritance_noise',   0.1),
-        )
-        fao.mutation_bias               = serialized['mutation_bias']
-        fao.total_failures_assimilated  = serialized.get('total_assimilated', 0)
-        fao.bias_update_count           = serialized.get('bias_updates',       0)
-        return fao
-
     def should_reset_bias(self, phi_current: float,
                            phi_history: List[float]) -> bool:
         """Stochastic bias reset if Φ declining despite learning."""
@@ -736,11 +562,7 @@ class FailureAssimilationOperator:
         return False
 
     def reset_to_baseline(self):
-        """Reset mutation bias to isotropic baseline."""
-        self.mutation_bias = {
-            'coupling_weights':     {k: 1.0 for k in self.mutation_bias['coupling_weights']},
-            'perturbation_emphasis': {k: 1.0 for k in self.mutation_bias['perturbation_emphasis']},
-        }
+        """Reset failure history."""
         self.failure_history.clear()
 
     # ── distill_to_ledger — REPLACES distill_to_genome ───────────────────────

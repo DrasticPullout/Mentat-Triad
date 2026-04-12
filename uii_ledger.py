@@ -323,7 +323,6 @@ def _build_default_operators() -> Tuple[
 
     compression = CompressionOperator(
         causal_graph      = {},
-        pattern_library   = {},
         residual_variance = {},
         prediction_errors = deque(maxlen=20),
         observation_count = 0,
@@ -331,10 +330,8 @@ def _build_default_operators() -> Tuple[
 
     prediction = PredictionOperator(
         channel_predictions  = {},
-        edge_predictions     = {},
         realized_horizon     = 0,
         prediction_accuracy  = {},
-        virtual_trajectories = [],
     )
 
     default_consistency = OperatorConsistencyCheck(
@@ -442,7 +439,6 @@ def load_ledger(path: str) -> Tuple[
     comp_snap = snapshot.get('compression', {})
     compression = CompressionOperator(
         causal_graph      = causal_graph,
-        pattern_library   = {},
         residual_variance = {k: float(v) for k, v
                              in comp_snap.get('residual_variance', {}).items()},
         prediction_errors = deque(maxlen=20),
@@ -463,11 +459,9 @@ def load_ledger(path: str) -> Tuple[
     pred_snap = snapshot.get('prediction', {})
     prediction = PredictionOperator(
         channel_predictions  = channel_predictions,
-        edge_predictions     = {},
         realized_horizon     = int(pred_snap.get('realized_horizon', 0)),
         prediction_accuracy  = {k: float(v) for k, v
                                 in pred_snap.get('prediction_accuracy', {}).items()},
-        virtual_trajectories = [],
     )
 
     # ── Reconstruct CoherenceOperator ────────────────────────────────────────

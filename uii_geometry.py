@@ -34,7 +34,7 @@ Contents:
     AgentHandler, UserAgentHandler, AVAILABLE_AGENTS — unchanged
 
   Adapters (ABCs)
-    RealityAdapter, IntelligenceAdapter — unchanged
+    RealityAdapter
 
   Orchestration
     DeathClock             — minimal step/token budget tracker (renamed from
@@ -46,7 +46,6 @@ Contents:
                              core logic unchanged; SRE coupling removed
 
 What is NOT here
-    SMO (old scalar class)     — private _BackCompatSMO kept for SubstrateState.smo shim
     LAYER1_PARAMS              — dead with velocity/generation system
     VELOCITY_FIELD             — dead with velocity/generation system
     RelationAdapter            — eliminated with SRE
@@ -91,7 +90,6 @@ BASE_AFFORDANCES: Set[str] = {
     'query_agent',
     'python',
     'llm_query',  # symbol grounding affordance — outcome feeds CouplingMatrixEstimator
-    'migrate',    # substrate migration — exits current environment, opens new causal surface
 }
 
 # Interface-coupled signals — artifacts of HTML/browser rendering, not reality structure.
@@ -114,65 +112,6 @@ SUBSTRATE_DIMS: List[str] = ['S', 'I', 'P', 'A']
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# _BackCompatSMO — private; only exists to give SubstrateState.smo its shim
-# ──────────────────────────────────────────────────────────────────────────────
-
-class _BackCompatSMO:
-    """
-    Minimal backward-compat scalar SMO shim.
-
-    Retained because SubstrateState.smo is still read by legacy code for:
-      - smo.rigidity     (log output)
-      - smo.prediction_error_history  (predict_delta error estimation)
-
-    The elaborate plasticity/rigidity dynamics from the old SMO class are
-    no longer the primary adaptation mechanism — SelfModifyingOperator in
-    uii_operators.py owns that. This shim is purely a data container that
-    can be updated by callers who still track per-step error history.
-
-    No new code should instantiate this directly. Access via SubstrateState.smo.
-    """
-
-    def __init__(self, history_depth: int = 10):
-        self.prediction_error_history: deque = deque(maxlen=100)
-        self.rigidity:   float = 0.5
-        self.plasticity: float = 0.5
-        self.state_history: deque = deque(maxlen=history_depth)
-        self.rollback_available: bool = False
-
-    def apply(self, current: float, observed_delta: float, predicted_delta: float = 0.0) -> float:
-        """Backward compat — logs prediction error into history."""
-        self.state_history.append(current)
-        self.rollback_available = True
-        prediction_error = abs(observed_delta - predicted_delta)
-        self.prediction_error_history.append(prediction_error)
-        rigidity_change = 0.01 if prediction_error < 0.02 else -0.02
-        self.rigidity = float(np.clip(self.rigidity + rigidity_change - 0.001, 0.0, 1.0))
-        self.plasticity = 1.0 - self.rigidity
-        modulated_delta = observed_delta * (1.0 - 0.3 * self.rigidity)
-        return float(np.clip(current + modulated_delta, 0.0, 1.0))
-
-    def get_recent_prediction_error(self, window: int = 10) -> float:
-        if len(self.prediction_error_history) < window:
-            return 0.0
-        return float(np.mean(list(self.prediction_error_history)[-window:]))
-
-    def reverse(self) -> Optional[float]:
-        if self.state_history:
-            previous = self.state_history.pop()
-            self.rollback_available = len(self.state_history) > 0
-            return previous
-        return None
-
-    def can_reverse(self) -> bool:
-        return self.rollback_available and len(self.state_history) > 0
-
-
-# Public alias for any legacy code that imported SMO from uii_types
-SMO = _BackCompatSMO
-
-
-# ──────────────────────────────────────────────────────────────────────────────
 # SubstrateState
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -182,11 +121,7 @@ class SubstrateState:
 
     S, I, P, A are properties derived from operators — all existing code that
     reads state.S, state.I, state.P, state.A continues to work unchanged.
-
-    self.smo: backward-compat _BackCompatSMO shim. Retained for code that
-    reads smo.rigidity and smo.prediction_error_history. No new v16 code
-    should write to it — SelfModifyingOperator in uii_operators.py is the
-    authoritative adaptation mechanism.
+    These scalar properties are for observation and logging only — not decision paths.
     """
 
     def __init__(self,
@@ -198,8 +133,6 @@ class SubstrateState:
         self.compression = compression
         self.prediction  = prediction
         self.coherence   = coherence
-        # Backward-compat scalar SMO shim — kept for legacy read access only
-        self.smo = _BackCompatSMO(history_depth=10)
 
     # ── Scalar proxies — derived from operators ───────────────────────────────
 
@@ -226,23 +159,6 @@ class SubstrateState:
 
     def as_dict(self) -> Dict[str, float]:
         return {"S": self.S, "I": self.I, "P": self.P, "A": self.A}
-
-    def apply_delta(self,
-                    observed_delta: Dict[str, float],
-                    predicted_delta: Dict[str, float] = None):
-        """
-        Backward-compat apply_delta: updates scalar SMO for error tracking.
-        Operator updates happen separately in the 9-step loop.
-        """
-        if predicted_delta is None:
-            predicted_delta = {'S': 0.0, 'I': 0.0, 'P': 0.0, 'A': 0.0}
-        self.smo.apply(self.S, observed_delta.get('S', 0), predicted_delta.get('S', 0))
-        self.smo.apply(self.I, observed_delta.get('I', 0), predicted_delta.get('I', 0))
-        self.smo.apply(self.P, observed_delta.get('P', 0), predicted_delta.get('P', 0))
-
-    def rollback(self) -> bool:
-        """Backward compat stub — v16 rollback handled by SMO.reverse() in uii_triad.py."""
-        return False
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -406,12 +322,34 @@ def expected_optionality_gain(prediction:         PredictionOperator,
     """
     E[Δlog(O(a))] = log_vol(Σ_P_post) - log_vol(Σ_P_pre)
 
-    v16.2.1: coupling_estimator passed through to test_virtual so virtual
-    delta uses empirical observations rather than hardcoded PRIMARY table.
+    log_vol counts only positive eigenvalues — near-zero eigenvalues
+    (dark or barely-active channels) do not penalize actions that open
+    new surface. Consistent with Vol_opt definition.
+
+    Forming path: when causal graph mean confidence < 0.1, covariance
+    EOG is unreliable. Use empirical affordance deltas if available,
+    else return uniform small positive to keep all actions viable.
 
     Called once per step for all actions before viable set construction.
     Result shared between C2 and score_actions(). Never recomputed inside either.
     """
+    # Forming: causal graph not yet reliable enough for covariance EOG.
+    if compression.causal_graph:
+        mean_conf = float(np.mean([e.confidence
+                                    for e in compression.causal_graph.values()]))
+    else:
+        mean_conf = 0.0
+
+    if mean_conf < 0.1:
+        if coupling_estimator is not None:
+            deltas = coupling_estimator.affordance_deltas.get(action, [])
+            if deltas:
+                return float(np.mean([
+                    np.mean([abs(v) for v in d.values()])
+                    for d in deltas if isinstance(d, dict) and d
+                ]))
+        return 0.05   # uniform — no data, no ranking, keep all actions viable
+
     sigma_pre, active = prediction.covariance_matrix(sensing, compression)
 
     if sigma_pre.shape[0] == 0:
@@ -442,8 +380,11 @@ def expected_optionality_gain(prediction:         PredictionOperator,
     sigma_post = (sigma_post + sigma_post.T) / 2.0
 
     def _log_vol(sigma: np.ndarray) -> float:
-        ev = np.linalg.eigvalsh(sigma)
-        return float(np.sum(np.log(np.clip(ev, 1e-9, None))))
+        ev  = np.linalg.eigvalsh(sigma)
+        pos = ev[ev > 1e-9]
+        if len(pos) == 0:
+            return 0.0
+        return float(np.sum(np.log(pos)))
 
     return _log_vol(sigma_post) - _log_vol(sigma_pre)
 
@@ -467,7 +408,7 @@ class PhiField:
 
     All v15.3 methods retained exactly:
       _compute_C, _build_sigma_p, _direction_crk_viable, _compute_O,
-      phi, gradient, phi_legacy.
+      phi, gradient.
 
     The gradient() K-term reads peak_snapshot using the v16 operator_snapshot
     format. When 'sensing.channels' key is absent it returns 0.0 gracefully —
@@ -477,13 +418,10 @@ class PhiField:
 
     O_FLOOR = 1e-6
 
-    def __init__(self, alpha: float = 1.0, beta: float = 1.0, gamma: float = 1.0,
-                 A0: float = 0.7, alpha_crk: float = 2.0):
+    def __init__(self, alpha: float = 1.0, beta: float = 1.0, gamma: float = 1.0):
         self.alpha     = alpha
         self.beta      = beta
         self.gamma     = gamma
-        self.A0        = A0           # retained for phi_legacy only
-        self.alpha_crk = alpha_crk    # retained for phi_legacy only
 
     # ── C(x) — unchanged from v15.3 ──────────────────────────────────────────
 
@@ -745,39 +683,6 @@ class PhiField:
             grad = {k: v / norm for k, v in grad.items()}
         return grad
 
-    # ── phi_legacy — retained for log output ─────────────────────────────────
-
-    @staticmethod
-    def si_capacity(S: float, I: float) -> float:
-        """Retained for phi_legacy and backward compat callers."""
-        return min(S, I) * 0.5 + (S + I) / 4.0
-
-    def phi_legacy(self, state, trace, crk_violations=None) -> float:
-        """
-        v15.2 legacy formula retained for log output.
-        α·log(1+P) - β·(A-A₀)² - γ·curvature - CRK_penalty
-        Not used for decisions.
-        """
-        cap = self.si_capacity(state.S, state.I)
-        effective_P = min(state.P, cap * 2.0)
-        opt    = np.log(1.0 + max(effective_P, 0.0))
-        strain = (state.A - self.A0) ** 2
-
-        recent = trace.get_recent(3) if trace is not None else []
-        curv   = 0.0
-        if len(recent) >= 3:
-            h0, h1, h2 = recent[-3], recent[-2], recent[-1]
-            for k in ["S", "I", "P", "A"]:
-                curv += abs(h2[k] - 2 * h1[k] + h0[k])
-
-        phi_raw    = self.alpha * opt - self.beta * strain - self.gamma * curv
-        crk_penalty = 0.0
-        if crk_violations:
-            crk_penalty = self.alpha_crk * sum(
-                severity for _, severity in crk_violations
-            )
-        return phi_raw - crk_penalty
-
     # ── compute_hessian — NEW in v16 ─────────────────────────────────────────
 
     def compute_hessian(self,
@@ -854,7 +759,7 @@ class PhiField:
             pos = ev > 1e-9
             if np.any(pos):
                 inv_ev = np.minimum(1.0 / ev[pos], 1e3)
-                H_O = evec[:, pos] @ np.diag(1.0 / ev[pos]) @ evec[:, pos].T
+                H_O = evec[:, pos] @ np.diag(inv_ev) @ evec[:, pos].T
             else:
                 H_O = np.zeros((n, n))
         else:
@@ -1055,12 +960,13 @@ class CRKMonitor:
     C4_SIGNAL_THRESHOLD         = 0.05
 
     def evaluate_pre_action(self,
-                             proposed_action: str,
-                             coherence:       CoherenceOperator,
-                             sensing:         SensingOperator,
-                             compression:     CompressionOperator,
-                             prediction:      PredictionOperator,
-                             field_state:     Dict,
+                             proposed_action:    str,
+                             coherence:          CoherenceOperator,
+                             sensing:            SensingOperator,
+                             compression:        CompressionOperator,
+                             prediction:         PredictionOperator,
+                             field_state:        Dict,
+                             coupling_estimator  = None,
                              ) -> CRKVerdict:
         crk_sig   = coherence.crk_signal()
         loop_cl   = crk_sig['loop_closure']
@@ -1100,7 +1006,15 @@ class CRKMonitor:
         # During forming: C1 is permissive (eog unreliable, bootstrap must explore).
         c1_stability_risk = 0.0
         try:
-            coupling   = compression.to_coupling_matrix()
+            # Use empirical SIPA coupling matrix from CouplingMatrixEstimator.
+            # That matrix is built from observed state_before/state_after on every
+            # execute() — it measures how SIPA dims actually co-move.
+            # to_coupling_matrix() (channel→SIPA projection via CHANNEL_TO_DIM)
+            # is removed: channels are S's domain; I/P/A do not receive raw channels.
+            if coupling_estimator is not None:
+                coupling = coupling_estimator.matrix
+            else:
+                coupling = np.eye(4)   # identity fallback during bootstrap
             pred_delta = self._get_predicted_delta(proposed_action, compression)
             delta_vec  = np.array([pred_delta.get(d, 0.0) for d in ['S', 'I', 'P', 'A']])
             stability  = float(0.5 * delta_vec @ coupling @ delta_vec)
@@ -1230,21 +1144,25 @@ class CRKMonitor:
 
     def evaluate_post_action(self,
                               proposed_smo_update: Dict,
-                              observed_delta:      Dict,
-                              predicted_delta:     Dict,
-                              sensing:             SensingOperator,
+                              prior_sensing:       SensingOperator,
+                              new_sensing:         SensingOperator,
+                              prior_coherence:     CoherenceOperator,
+                              new_coherence:       CoherenceOperator,
                               compression:         CompressionOperator,
                               prediction:          PredictionOperator,
-                              coherence:           CoherenceOperator,
                               prior_compression:   CompressionOperator,
+                              prediction_errors:   Dict,
                               smo_plasticity:      float = 0.5,
                               ) -> CRKVerdict:
         evaluations: List[CRKEvaluation] = []
-        evaluations.append(self._c4_post(observed_delta, predicted_delta, sensing, compression))
-        evaluations.append(self._c5_post(observed_delta, predicted_delta, coherence))
+        evaluations.append(self._c4_post(prediction, new_sensing, compression))
+        evaluations.append(self._c5_post(new_coherence))
         evaluations.append(self._c1_post(proposed_smo_update, prior_compression, compression))
-        evaluations.append(self._c3_post(observed_delta, predicted_delta,
-                                          proposed_smo_update, coherence))
+        evaluations.append(self._c3_post(
+            prior_sensing, new_sensing,
+            prior_coherence, new_coherence,
+            prediction_errors,
+        ))
 
         smo_permitted = not any(e.blocks for e in evaluations)
         repair = None
@@ -1276,59 +1194,47 @@ class CRKMonitor:
         )
 
     def _c3_post(self,
-                 observed_delta:    Dict,
-                 predicted_delta:   Dict,
-                 prediction_errors: Dict,
-                 coherence:         CoherenceOperator) -> CRKEvaluation:
+                 prior_sensing:   SensingOperator,
+                 new_sensing:     SensingOperator,
+                 prior_coherence: CoherenceOperator,
+                 new_coherence:   CoherenceOperator,
+                 prediction_errors: Dict) -> CRKEvaluation:
         """
         C3: Non-Internalization — accurate causal attribution.
 
-        Failure should be learned from. The violation is misattribution:
-        the system blaming itself for an externally-caused failure, or
-        collapsing internal coherence (A) when the cause was an internal
-        model error that P should simply learn from.
+        Spec: Δ(outcome_value) must not imply Δ(self_authority) < 0.
 
-        Violation condition — all three must hold:
-          1. A dropped significantly       → coherence is falling
-          2. S was stable (|ΔS| small)     → environment wasn't the cause
-          3. Prediction error was large    → internal model failed
+        Violation: A dropped (loop_closure fell) while S was stable
+        AND prediction errors were large — meaning the system is blaming
+        itself (coherence collapsing) for an internal model failure in
+        a stable environment. Correct response: P updates accuracy, A recovers.
 
-        This means: A fell because P was wrong about a stable environment.
-        That's the self-blame loop — the correct response is for P to update
-        its accuracy, not for A to collapse.
-
-        If A dropped because S moved violently: external cause, correct behavior.
-        If A dropped and prediction errors were small: something else, not C3.
-        If A is stable: no attribution problem regardless of errors.
-
-        Blocks: False — C3 does not block SMO. It flags for reattribute repair,
-        which caps plasticity to prevent compounding adaptation in wrong direction.
+        All signals derived from operator state — no SIPA delta dict.
         """
-        # A drop: how much did coherence fall this step?
-        delta_A  = float(observed_delta.get('A', 0.0))
+        delta_A   = (new_coherence.consistency.loop_closure
+                     - prior_coherence.consistency.loop_closure)
         a_dropped = delta_A < -self.C3_A_DROP_THRESHOLD
 
         if not a_dropped:
             return CRKEvaluation('C3', 'post_action', 'satisfied', 0.0, 'external', False,
-                                 f'ΔA={delta_A:+.3f} — coherence stable, no attribution check needed')
+                                 f'ΔA={delta_A:+.3f} — coherence stable')
 
-        # Was the environment stable? (|ΔS| small → not externally driven)
-        delta_S   = abs(float(observed_delta.get('S', 0.0)))
+        # Was the environment the cause? — S moved significantly
+        delta_S   = abs(new_sensing.to_scalar_proxy() - prior_sensing.to_scalar_proxy())
         env_moved = delta_S > self.C3_S_STABLE_THRESHOLD
 
         if env_moved:
             return CRKEvaluation('C3', 'post_action', 'satisfied', abs(delta_A), 'external', False,
                                  f'ΔA={delta_A:+.3f}, ΔS={delta_S:.3f} — '
-                                 f'environment caused the drop, attribution correct')
+                                 f'environment drove the drop, attribution correct')
 
         # Was it an internal model failure?
-        mean_error = (float(np.mean(list(prediction_errors.values())))
-                      if prediction_errors else 0.0)
+        mean_error   = (float(np.mean(list(prediction_errors.values())))
+                        if prediction_errors else 0.0)
         model_failed = mean_error > self.C3_P_ERROR_THRESHOLD
 
         if model_failed:
-            severity = abs(delta_A)
-            return CRKEvaluation('C3', 'post_action', 'violated', severity,
+            return CRKEvaluation('C3', 'post_action', 'violated', abs(delta_A),
                                  'internal', False,
                                  f'ΔA={delta_A:+.3f}, ΔS={delta_S:.3f}, '
                                  f'P_error={mean_error:.3f} — '
@@ -1339,28 +1245,27 @@ class CRKMonitor:
                              f'ΔA={delta_A:+.3f}, ΔS={delta_S:.3f}, '
                              f'P_error={mean_error:.3f} — cause ambiguous, monitoring')
 
-    def _c4_post(self, observed: Dict, predicted: Dict,
-                 sensing: SensingOperator,
+    def _c4_post(self,
+                 prediction:  PredictionOperator,
+                 sensing:     SensingOperator,
                  compression: CompressionOperator) -> CRKEvaluation:
         """
         C4: Reality Constraint — model field as independent, uncertain.
 
+        Spec: uncertainty(field_model) > 0.
         Violation = deterministic overconfidence without reality contact.
-        High P-horizon confidence while sensing signal is weak = the closed
-        door: predicting without checking what's actually there.
 
-        Fires when:
-          realized_horizon is high (P thinks it can predict far ahead)
-          AND mean signal_rate across active channels is low (S not getting
-          fresh signal from reality to ground those predictions).
+        High realized_horizon (P thinks it can predict far ahead)
+        AND low mean signal_rate across active channels (S not getting
+        fresh signal from Reality to ground those predictions).
 
-        Zero realized_horizon = bootstrap, no violation possible.
+        Reads directly from operator state — no SIPA delta dict.
         """
         if len(compression.causal_graph) == 0:
             return CRKEvaluation('C4', 'post_action', 'satisfied', 0.0, 'external', False,
                                  'forming — no model yet')
 
-        realized_horizon = int(observed.get('_realized_horizon', 0))
+        realized_horizon = prediction.realized_horizon
         horizon_norm     = float(np.clip(realized_horizon / 50.0, 0.0, 1.0))
 
         if horizon_norm < 1e-6:
@@ -1411,8 +1316,7 @@ class CRKMonitor:
         return CRKEvaluation('C1', 'post_action', 'satisfied', 0.0, 'internal', False,
                              'continuity preserved')
 
-    def _c5_post(self, observed: Dict, predicted: Dict,
-                 coherence: CoherenceOperator) -> CRKEvaluation:
+    def _c5_post(self, coherence: CoherenceOperator) -> CRKEvaluation:
         i_p = coherence.consistency.i_p_consistency
         p_a = coherence.consistency.p_a_consistency
         if i_p < 0.4 and p_a > 0.6:
@@ -1543,18 +1447,6 @@ class RealityAdapter(ABC):
 
     @abstractmethod
     def close(self): ...
-
-
-class IntelligenceAdapter(ABC):
-    """Interface for Relation component of Mentat Triad."""
-
-    @abstractmethod
-    def enumerate_trajectories(self, context: Dict) -> TrajectoryManifold: ...
-
-    @abstractmethod
-    def record_committed_trajectory(self, trajectory: TrajectoryCandidate,
-                                    phi_final: float): ...
-
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1726,7 +1618,6 @@ class SymbolGroundingAdapter:
     def __init__(self, llm_client):
         self.llm                = llm_client
         self.call_count         = 0
-        self.trajectory_history = deque(maxlen=3)
 
     def ground_trajectories(self,
                              diagnosis: Dict,
@@ -1748,21 +1639,11 @@ class SymbolGroundingAdapter:
         boundary_pressure  = context.get('boundary_pressure', 0.0)
         shapes             = diagnosis.get('trajectory_shapes', [])
 
-        token_budget       = context.get('token_budget', None)
-        token_pressure     = context.get('token_pressure', None)
-        binding_constraint = context.get('binding_constraint', 'steps')
-
-        if token_budget is not None and token_pressure is not None:
-            remaining              = int(token_budget * (1.0 - token_pressure))
-            token_budget_remaining = f"{remaining:,} (binding: {binding_constraint})"
-        else:
-            token_budget_remaining = "unknown"
-
         migration_urgency = diagnosis.get('migration_urgency', 'focused')
-        if migration_urgency == 'emergency' or (
-            token_pressure is not None and token_pressure > 0.8
-        ):
+        if migration_urgency == 'emergency':
             shapes = shapes[:1]
+
+        token_budget_remaining = "unknown"
 
         evidence       = diagnosis.get('evidence', [])
         evidence_lines = "\n".join(f"    - {e}" for e in evidence)
@@ -2008,12 +1889,4 @@ class SymbolGroundingAdapter:
                 continue
         return candidates
 
-    def record_committed_trajectory(self,
-                                     trajectory: TrajectoryCandidate,
-                                     phi_final:  float):
-        """Record committed trajectory for context in future calls. Unchanged from v15."""
-        self.trajectory_history.append({
-            'steps':     trajectory.steps,
-            'rationale': trajectory.rationale,
-            'phi_final': phi_final,
-        })
+
