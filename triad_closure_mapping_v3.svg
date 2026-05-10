@@ -1,0 +1,156 @@
+<svg width="100%" viewBox="0 0 820 660" role="img" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, sans-serif">
+<title>Triadic closure through the DASS loop: operators, deltas, and f_rel as carried substance</title>
+<desc>Three operator-deltas (delta f_self, delta f_env, delta f_rel) feed only into Sensing. Compression assembles the triadic closure operator f_rel = f_rel(f_self(x), f_env(x)). Prediction probes affordances structurally available given current f_rel and returns per-affordance closure residuals (predicted delta f_rel under each candidate). Coherence is a gate: when it fires it emits f_rel plus action; otherwise just f_rel. SMO computes the new delta f_rel and routes it back to Sensing, closing the loop. The substance flowing through I, P, A, SMO is f_rel; the perturbations are the deltas. Optionality is reachable state-space volume by construction, read externally as the P coordinate from Sigma_P; the loop does not consume it as a target.</desc>
+
+<defs>
+  <marker id="arr-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M2 1L8 5L2 9" fill="none" stroke="rgb(156,154,146)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </marker>
+  <marker id="arr-rel" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M2 1L8 5L2 9" fill="none" stroke="rgb(175,169,236)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </marker>
+</defs>
+
+<!-- ===== HEADER ===== -->
+<text x="40" y="32" font-size="14" font-weight="500" fill="rgb(211,209,199)">Triadic closure through the DASS loop</text>
+<text x="40" y="52" font-size="12" fill="rgb(194,192,182)">Operators map to closure: f_rel is the substance carried; δ-streams are the perturbations.   T(x) = f_rel( f_self(x), f_env(x) )</text>
+
+<!-- ===== SECTION HEADERS ===== -->
+<text x="40" y="84" font-size="11" fill="rgb(156,154,146)">Perturbation sources (operator deltas)</text>
+<text x="380" y="84" text-anchor="middle" font-size="11" fill="rgb(156,154,146)">DASS loop (cognition)</text>
+<text x="610" y="84" text-anchor="middle" font-size="11" fill="rgb(156,154,146)">Operator → closure mapping</text>
+
+<!-- ===== LEFT: PERTURBATION PANELS ===== -->
+
+<!-- δf_self -->
+<g>
+  <rect x="40" y="94" width="200" height="68" rx="8" fill="rgb(8,80,65)" stroke="rgb(93,202,165)" stroke-width="0.5"/>
+  <text x="140" y="118" text-anchor="middle" font-size="14" font-weight="500" fill="rgb(159,225,203)">δf_self</text>
+  <text x="140" y="138" text-anchor="middle" font-size="12" fill="rgb(93,202,165)">self-model updates</text>
+  <text x="140" y="154" text-anchor="middle" font-size="12" fill="rgb(93,202,165)">(self perturbation)</text>
+</g>
+
+<!-- δf_env -->
+<g>
+  <rect x="40" y="174" width="200" height="68" rx="8" fill="rgb(113,43,19)" stroke="rgb(240,153,123)" stroke-width="0.5"/>
+  <text x="140" y="198" text-anchor="middle" font-size="14" font-weight="500" fill="rgb(245,196,179)">δf_env</text>
+  <text x="140" y="218" text-anchor="middle" font-size="12" fill="rgb(240,153,123)">browser, LLMs, sensors</text>
+  <text x="140" y="234" text-anchor="middle" font-size="12" fill="rgb(240,153,123)">(environment perturbation)</text>
+</g>
+
+<!-- δf_rel -->
+<g>
+  <rect x="40" y="254" width="200" height="68" rx="8" fill="rgb(60,52,137)" stroke="rgb(175,169,236)" stroke-width="0.5"/>
+  <text x="140" y="278" text-anchor="middle" font-size="14" font-weight="500" fill="rgb(206,203,246)">δf_rel</text>
+  <text x="140" y="298" text-anchor="middle" font-size="12" fill="rgb(175,169,236)">SMO loop residual</text>
+  <text x="140" y="314" text-anchor="middle" font-size="12" fill="rgb(175,169,236)">(relation perturbation)</text>
+</g>
+
+<!-- arrows from sources into S -->
+<path d="M240 128 Q278 124 318 118" fill="none" stroke="rgb(156,154,146)" stroke-width="1.5" marker-end="url(#arr-gray)"/>
+<path d="M240 208 Q278 165 318 122" fill="none" stroke="rgb(156,154,146)" stroke-width="1.5" marker-end="url(#arr-gray)"/>
+<path d="M240 288 Q278 210 318 126" fill="none" stroke="rgb(156,154,146)" stroke-width="1.5" marker-end="url(#arr-gray)"/>
+
+<!-- ===== CENTER: DASS COLUMN ===== -->
+
+<!-- S -->
+<g>
+  <rect x="320" y="94" width="120" height="44" rx="8" fill="rgb(68,68,65)" stroke="rgb(180,178,169)" stroke-width="1.5"/>
+  <text x="380" y="116" text-anchor="middle" font-size="14" font-weight="500" fill="rgb(211,209,199)">S</text>
+  <text x="380" y="132" text-anchor="middle" font-size="12" fill="rgb(180,178,169)">Sensing</text>
+</g>
+
+<!-- S → I  (carries the three deltas, gray) -->
+<line x1="380" y1="138" x2="380" y2="166" stroke="rgb(156,154,146)" stroke-width="1.5" marker-end="url(#arr-gray)"/>
+<text x="386" y="156" font-size="10" fill="rgb(194,192,182)">{δf_self, δf_env, δf_rel}</text>
+
+<!-- I -->
+<g>
+  <rect x="320" y="170" width="120" height="44" rx="8" fill="rgb(68,68,65)" stroke="rgb(175,169,236)" stroke-width="1"/>
+  <text x="380" y="192" text-anchor="middle" font-size="14" font-weight="500" fill="rgb(211,209,199)">I</text>
+  <text x="380" y="208" text-anchor="middle" font-size="12" fill="rgb(180,178,169)">Compression</text>
+</g>
+
+<!-- I → P  (carries f_rel, purple — closure assembled) -->
+<line x1="380" y1="214" x2="380" y2="242" stroke="rgb(175,169,236)" stroke-width="1.5" marker-end="url(#arr-rel)"/>
+<text x="386" y="232" font-size="10" font-weight="500" fill="rgb(206,203,246)">f_rel  (assembled)</text>
+
+<!-- P -->
+<g>
+  <rect x="320" y="246" width="120" height="44" rx="8" fill="rgb(68,68,65)" stroke="rgb(175,169,236)" stroke-width="1"/>
+  <text x="380" y="268" text-anchor="middle" font-size="14" font-weight="500" fill="rgb(211,209,199)">P</text>
+  <text x="380" y="284" text-anchor="middle" font-size="12" fill="rgb(180,178,169)">Prediction</text>
+</g>
+
+<!-- P → A  (f_rel + per-affordance δf_rel) -->
+<line x1="380" y1="290" x2="380" y2="318" stroke="rgb(175,169,236)" stroke-width="1.5" marker-end="url(#arr-rel)"/>
+<text x="386" y="308" font-size="10" fill="rgb(206,203,246)">f_rel + per-affordance δf_rel</text>
+
+<!-- A -->
+<g>
+  <rect x="320" y="322" width="120" height="44" rx="8" fill="rgb(68,68,65)" stroke="rgb(175,169,236)" stroke-width="1"/>
+  <text x="380" y="344" text-anchor="middle" font-size="14" font-weight="500" fill="rgb(211,209,199)">A</text>
+  <text x="380" y="360" text-anchor="middle" font-size="12" fill="rgb(180,178,169)">Coherence (gate)</text>
+</g>
+
+<!-- A → SMO  (f_rel + action if gate fires) -->
+<line x1="380" y1="366" x2="380" y2="394" stroke="rgb(175,169,236)" stroke-width="1.5" marker-end="url(#arr-rel)"/>
+<text x="386" y="384" font-size="10" fill="rgb(206,203,246)">f_rel  (+ action if committed)</text>
+
+<!-- SMO -->
+<g>
+  <rect x="320" y="398" width="120" height="44" rx="8" fill="rgb(68,68,65)" stroke="rgb(175,169,236)" stroke-width="1"/>
+  <text x="380" y="420" text-anchor="middle" font-size="14" font-weight="500" fill="rgb(211,209,199)">SMO</text>
+  <text x="380" y="436" text-anchor="middle" font-size="12" fill="rgb(180,178,169)">Adaptation</text>
+</g>
+
+<!-- ===== LOOP CLOSURE: SMO → S (δf_rel, purple, around the right) ===== -->
+<!-- Exits SMO at bottom, routes around the right past callouts, returns to S top -->
+<path d="M380 442 L380 466 L780 466 L780 116 L440 116" fill="none" stroke="rgb(175,169,236)" stroke-width="1.5" marker-end="url(#arr-rel)"/>
+<text x="610" y="108" text-anchor="middle" font-size="11" font-weight="500" fill="rgb(206,203,246)">δf_rel   (loop closure)</text>
+<text x="580" y="460" text-anchor="middle" font-size="10" fill="rgb(175,169,236)">SMO computes δf_rel from closure residual</text>
+
+<!-- ===== ACTION OUTPUT (A commit → external) ===== -->
+<path d="M320 344 L295 344 L295 478 L240 478" fill="none" stroke="rgb(156,154,146)" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arr-gray)"/>
+<text x="140" y="448" text-anchor="middle" font-size="10" fill="rgb(194,192,182)">action  (when gate fires)</text>
+<g>
+  <rect x="40" y="460" width="200" height="36" rx="8" fill="rgb(12,68,124)" stroke="rgb(133,183,235)" stroke-width="0.5"/>
+  <text x="140" y="482" text-anchor="middle" font-size="12" fill="rgb(181,212,244)">→ external surface</text>
+</g>
+
+<!-- ===== RIGHT: OPERATOR → CLOSURE CALLOUTS ===== -->
+
+<!-- I callout: triadic closure assembled -->
+<g>
+  <rect x="480" y="170" width="260" height="44" rx="8" fill="rgb(60,52,137)" fill-opacity="0.18" stroke="rgb(175,169,236)" stroke-width="0.5" stroke-dasharray="3 3"/>
+  <text x="492" y="190" font-size="11" font-weight="500" fill="rgb(206,203,246)">Triadic closure assembled here</text>
+  <text x="492" y="206" font-size="11" fill="rgb(175,169,236)">f_rel = f_rel( f_self(x), f_env(x) )</text>
+</g>
+<line x1="440" y1="192" x2="478" y2="192" stroke="rgb(175,169,236)" stroke-width="0.5" stroke-dasharray="2 2"/>
+
+<!-- P callout: affordances + per-affordance residuals -->
+<g>
+  <rect x="480" y="246" width="260" height="44" rx="8" fill="none" stroke="rgb(180,178,169)" stroke-width="0.5" stroke-dasharray="3 3"/>
+  <text x="492" y="266" font-size="11" font-weight="500" fill="rgb(211,209,199)">Affordances + per-affordance δf_rel</text>
+  <text x="492" y="282" font-size="10" fill="rgb(194,192,182)">P probes what's structurally reachable; no in-loop ranking</text>
+</g>
+<line x1="440" y1="268" x2="478" y2="268" stroke="rgb(180,178,169)" stroke-width="0.5" stroke-dasharray="2 2"/>
+
+<!-- A callout: gate behavior -->
+<g>
+  <rect x="480" y="322" width="260" height="44" rx="8" fill="none" stroke="rgb(180,178,169)" stroke-width="0.5" stroke-dasharray="3 3"/>
+  <text x="492" y="342" font-size="11" font-weight="500" fill="rgb(211,209,199)">Gate: structural consistency</text>
+  <text x="492" y="358" font-size="10" fill="rgb(194,192,182)">fires when predicted δf_rel under candidate stays bounded</text>
+</g>
+<line x1="440" y1="344" x2="478" y2="344" stroke="rgb(180,178,169)" stroke-width="0.5" stroke-dasharray="2 2"/>
+
+<!-- ===== BOTTOM: CORE INVARIANT ===== -->
+<line x1="40" y1="540" x2="780" y2="540" stroke="rgb(156,154,146)" stroke-width="0.5" opacity="0.3"/>
+<text x="40" y="566" font-size="11" fill="rgb(156,154,146)">Core invariant (Math Spine §11)</text>
+<g>
+  <rect x="40" y="578" width="740" height="56" rx="8" fill="rgb(68,68,65)" stroke="rgb(180,178,169)" stroke-width="0.5"/>
+  <text x="410" y="600" text-anchor="middle" font-size="12" fill="rgb(211,209,199)">Loop is intelligent  ⇔   C_global &gt; 0   ∧   δ²Φ ≥ 0   ∧   T(x) preserved</text>
+  <text x="410" y="618" text-anchor="middle" font-size="11" fill="rgb(194,192,182)">Triadic closure T(x) = relational consistency that f_rel maintains across state transitions.   Closure-holding limit: residual → 0, ẋ ∝ ∇Φ(x).</text>
+</g>
+
+</svg>
